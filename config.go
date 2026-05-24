@@ -5,10 +5,18 @@ import (
 	"os"
 )
 
+// Cookie 结构用于保存详细的 Cookie 信息
+type Cookie struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+	Path   string `json:"path"`
+}
+
 type TaskConfig struct {
-	Name      string `json:"name"`
-	URL       string `json:"url"`
-	CookieStr string `json:"cookie_str"`
+	Name    string   `json:"name"`
+	URL     string   `json:"url"`
+	Cookies []Cookie `json:"cookies"` // 替换原有的 CookieStr
 }
 
 type Config struct {
@@ -47,13 +55,13 @@ func (c *Config) GetTask(name string) *TaskConfig {
 	return nil
 }
 
-func (c *Config) UpdateTaskCookie(name, cookieStr string) {
+func (c *Config) UpdateTaskCookies(name string, cookies []Cookie) {
 	for i := range c.Tasks {
 		if c.Tasks[i].Name == name {
-			c.Tasks[i].CookieStr = cookieStr
+			c.Tasks[i].Cookies = cookies
 			return
 		}
 	}
 	// 如果不存在，则新增（通常用于初始化）
-	c.Tasks = append(c.Tasks, TaskConfig{Name: name, CookieStr: cookieStr})
+	c.Tasks = append(c.Tasks, TaskConfig{Name: name, Cookies: cookies})
 }

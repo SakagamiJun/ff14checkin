@@ -31,8 +31,17 @@ func generateUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
+// cookiesToStr 把 Cookie 结构体数组转成用于 HTTP Header 的字符串
+func cookiesToStr(cookies []Cookie) string {
+	var strs []string
+	for _, c := range cookies {
+		strs = append(strs, c.Name+"="+c.Value)
+	}
+	return strings.Join(strs, "; ")
+}
+
 // refreshCookies 启动一个无头浏览器访问目标 URL，过验后抓取完整 Cookie
-func refreshCookies(targetURL, currentCookie string) (string, error) {
+func refreshCookies(targetURL string, currentCookies []Cookie) ([]Cookie, error) {
 	fmt.Printf("正在通过 chromedp 刷新 Cookie [%s]...\n", targetURL)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
@@ -48,28 +57,21 @@ func refreshCookies(targetURL, currentCookie string) (string, error) {
 	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var newCookieStr string
+	var newCookies []Cookie
 
 	err := chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			if currentCookie == "" {
+			if len(currentCookies) == 0 {
 				return nil
 			}
-			u, _ := url.Parse(targetURL)
-			domain := u.Hostname()
-			if strings.Contains(domain, "sdo.com") {
-				domain = ".sdo.com"
-			}
-			pairs := strings.Split(currentCookie, ";")
-			for _, pair := range pairs {
-				parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-				if len(parts) == 2 {
-					name, val := parts[0], parts[1]
-					if name == "path" || name == "domain" {
-						continue
-					}
-					network.SetCookie(name, val).WithDomain(domain).WithPath("/").Do(ctx)
+			for _, c := range currentCookies {
+				domain := c.Domain
+				path := c.Path
+				if path == "" {
+					path = "/"
 				}
+				// 严格按照原有的 Domain 和 Path 注入
+				network.SetCookie(c.Name, c.Value).WithDomain(domain).WithPath(path).Do(ctx)
 			}
 			return nil
 		}),
@@ -80,19 +82,22 @@ func refreshCookies(targetURL, currentCookie string) (string, error) {
 			if err != nil {
 				return err
 			}
-			var cookieStrs []string
 			for _, c := range cookies {
-				cookieStrs = append(cookieStrs, c.Name+"="+c.Value)
+				newCookies = append(newCookies, Cookie{
+					Name:   c.Name,
+					Value:  c.Value,
+					Domain: c.Domain,
+					Path:   c.Path,
+				})
 			}
-			newCookieStr = strings.Join(cookieStrs, "; ")
 			return nil
 		}),
 	)
 
-	return newCookieStr, err
+	return newCookies, err
 }
 
-func interactiveLogin(targetURL string) (string, error) {
+func interactiveLogin(targetURL string) ([]Cookie, error) {
 	fmt.Printf("启动可视化浏览器，请在窗口中登录 [%s]...\n", targetURL)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
@@ -108,7 +113,7 @@ func interactiveLogin(targetURL string) (string, error) {
 	ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	var newCookieStr string
+	var newCookies []Cookie
 
 	err := chromedp.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -125,63 +130,74 @@ func interactiveLogin(targetURL string) (string, error) {
 			if err != nil {
 				return err
 			}
-			var cookieStrs []string
 			for _, c := range cookies {
-				cookieStrs = append(cookieStrs, c.Name+"="+c.Value)
+				newCookies = append(newCookies, Cookie{
+					Name:   c.Name,
+					Value:  c.Value,
+					Domain: c.Domain,
+					Path:   c.Path,
+				})
 			}
-			newCookieStr = strings.Join(cookieStrs, "; ")
 			return nil
 		}),
 	)
 
-	return newCookieStr, err
+	return newCookies, err
 }
 
-// mergeCookies 合并旧的 Cookie 字符串和新的 Cookie 对象，返回合并后的字符串和是否发生变化
-func mergeCookies(oldStr string, newCookies []*http.Cookie) (string, bool) {
-	if len(newCookies) == 0 {
-		return oldStr, false
+// mergeCookies 合并旧的 Cookie 结构数组和新的 Cookie 对象，返回合并后的数组和是否发生变化
+func mergeCookies(oldCookies []Cookie, newHttpCookies []*http.Cookie) ([]Cookie, bool) {
+	if len(newHttpCookies) == 0 {
+		return oldCookies, false
 	}
 
-	cookieMap := make(map[string]string)
-	pairs := strings.Split(oldStr, ";")
-	for _, pair := range pairs {
-		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-		if len(parts) == 2 {
-			cookieMap[parts[0]] = parts[1]
-		}
+	cookieMap := make(map[string]Cookie)
+	for _, c := range oldCookies {
+		cookieMap[c.Name] = c
 	}
 
 	changed := false
-	for _, c := range newCookies {
-		if cookieMap[c.Name] != c.Value {
-			cookieMap[c.Name] = c.Value
+	for _, hc := range newHttpCookies {
+		if existing, ok := cookieMap[hc.Name]; !ok || existing.Value != hc.Value {
+			domain := hc.Domain
+			if domain == "" {
+				domain = ".sdo.com"
+			}
+			path := hc.Path
+			if path == "" {
+				path = "/"
+			}
+			cookieMap[hc.Name] = Cookie{
+				Name:   hc.Name,
+				Value:  hc.Value,
+				Domain: domain,
+				Path:   path,
+			}
 			changed = true
 		}
 	}
 
 	if !changed {
-		return oldStr, false
+		return oldCookies, false
 	}
 
+	var out []Cookie
 	var keys []string
 	for k := range cookieMap {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
-	var out []string
 	for _, k := range keys {
-		out = append(out, k+"="+cookieMap[k])
+		out = append(out, cookieMap[k])
 	}
-	return strings.Join(out, "; "), true
+	return out, true
 }
 
 // preflightRequest 在调用正式 API 前，先访问主站以触发服务器下发最新的 Session Cookie
 func preflightRequest(targetURL string, cfg *Config, task *TaskConfig) {
 	fmt.Printf("执行签到前置请求以刷新 Session: %s\n", targetURL)
 	req, _ := http.NewRequest("GET", targetURL, nil)
-	req.Header.Set("Cookie", task.CookieStr)
+	req.Header.Set("Cookie", cookiesToStr(task.Cookies))
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 	options := []tls_client.HttpClientOption{
@@ -197,9 +213,9 @@ func preflightRequest(targetURL string, cfg *Config, task *TaskConfig) {
 	}
 	defer resp.Body.Close()
 
-	newCookieStr, changed := mergeCookies(task.CookieStr, resp.Cookies())
+	newCookies, changed := mergeCookies(task.Cookies, resp.Cookies())
 	if changed {
-		task.CookieStr = newCookieStr
+		task.Cookies = newCookies
 		SaveConfig(configFile, cfg)
 		fmt.Println("前置请求成功，已获取最新 Session Cookie 并保存。")
 	} else {
@@ -218,9 +234,9 @@ func executeTask(cfg *Config, taskName string) {
 	fmt.Printf("\n--- 开始执行任务: %s ---\n", task.Name)
 
 	// 1. 尝试无头模式刷新 Cookie
-	newCookie, _ := refreshCookies(task.URL, task.CookieStr)
-	if newCookie != "" {
-		task.CookieStr = newCookie
+	newCookies, _ := refreshCookies(task.URL, task.Cookies)
+	if len(newCookies) > 0 {
+		task.Cookies = newCookies
 		SaveConfig(configFile, cfg)
 	}
 
@@ -230,16 +246,16 @@ func executeTask(cfg *Config, taskName string) {
 		preflightRequest("https://ff14risingstones.web.sdo.com/", cfg, task)
 		needsLogin = doFF14SignIn(cfg, task)
 	} else if task.Name == "qu_sdo" {
-		preflightRequest("https://qu.sdo.com/", cfg, task)
+		preflightRequest("https://qu.sdo.com/personal-center", cfg, task)
 		needsLogin = doQuSignIn(cfg, task)
 	}
 
 	// 3. 手动接管逻辑
 	if needsLogin {
 		fmt.Printf("任务 %s 身份失效或需要验证，进入手动接管模式...\n", task.Name)
-		freshCookie, err := interactiveLogin(task.URL)
-		if err == nil && freshCookie != "" {
-			task.CookieStr = freshCookie
+		freshCookies, err := interactiveLogin(task.URL)
+		if err == nil && len(freshCookies) > 0 {
+			task.Cookies = freshCookies
 			SaveConfig(configFile, cfg)
 			fmt.Println("身份已更新，进行最终尝试...")
 			if task.Name == "ff14risingstones" {
@@ -264,14 +280,14 @@ func doFF14SignIn(cfg *Config, task *TaskConfig) bool {
 	
 	req, _ := http.NewRequest("POST", u.String(), strings.NewReader(formData.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Cookie", task.CookieStr)
+	req.Header.Set("Cookie", cookiesToStr(task.Cookies))
 	req.Header.Set("Referer", "https://ff14risingstones.web.sdo.com/")
 	req.Header.Set("Origin", "https://ff14risingstones.web.sdo.com")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-	needsLogin, newCookie := performRequest(req, task.CookieStr)
-	if newCookie != "" {
-		task.CookieStr = newCookie
+	needsLogin, newCookies := performRequest(req, task.Cookies)
+	if len(newCookies) > 0 {
+		task.Cookies = newCookies
 		SaveConfig(configFile, cfg)
 		fmt.Println("API 响应中检测到 Cookie 更新，已自动保存。")
 	}
@@ -288,22 +304,22 @@ func doQuSignIn(cfg *Config, task *TaskConfig) bool {
 	req.Header.Set("qu-software-platform", "1")
 	req.Header.Set("qu-deploy-platform", "1")
 	req.Header.Set("qu-web-host", "qu.sdo.com")
-	req.Header.Set("Cookie", task.CookieStr)
+	req.Header.Set("Cookie", cookiesToStr(task.Cookies))
 	req.Header.Set("Referer", "https://qu.sdo.com/")
 	req.Header.Set("Origin", "https://qu.sdo.com")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-	needsLogin, newCookie := performRequest(req, task.CookieStr)
-	if newCookie != "" {
-		task.CookieStr = newCookie
+	needsLogin, newCookies := performRequest(req, task.Cookies)
+	if len(newCookies) > 0 {
+		task.Cookies = newCookies
 		SaveConfig(configFile, cfg)
 		fmt.Println("API 响应中检测到 Cookie 更新，已自动保存。")
 	}
 	return needsLogin
 }
 
-func performRequest(req *http.Request, currentCookie string) (bool, string) {
+func performRequest(req *http.Request, currentCookies []Cookie) (bool, []Cookie) {
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(15),
 		tls_client.WithClientProfile(profiles.Chrome_124),
@@ -313,13 +329,13 @@ func performRequest(req *http.Request, currentCookie string) (bool, string) {
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("请求异常: %v\n", err)
-		return true, ""
+		return true, nil
 	}
 	defer resp.Body.Close()
 
-	newCookieStr, changed := mergeCookies(currentCookie, resp.Cookies())
+	newCookies, changed := mergeCookies(currentCookies, resp.Cookies())
 	if !changed {
-		newCookieStr = ""
+		newCookies = nil
 	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
@@ -334,7 +350,7 @@ func performRequest(req *http.Request, currentCookie string) (bool, string) {
 	if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
 		pretty, _ := json.MarshalIndent(jsonObj, "", "  ")
 		fmt.Printf("响应内容: \n%s\n", string(pretty))
-		if code, ok := jsonObj["code"].(float64); ok && (code == 10105 || code == -10350174) {
+		if code, ok := jsonObj["code"].(float64); ok && (code == 10105 || code == 10403 || code == -10350174) {
 			needsLogin = true
 		}
 		// 趣商城的返回码是 resultCode
@@ -344,7 +360,7 @@ func performRequest(req *http.Request, currentCookie string) (bool, string) {
 	} else {
 		needsLogin = true
 	}
-	return needsLogin, newCookieStr
+	return needsLogin, newCookies
 }
 
 func main() {
@@ -359,8 +375,16 @@ func main() {
 		log.Fatalf("配置加载失败: %v", err)
 	}
 
-	for _, task := range cfg.Tasks {
-		executeTask(cfg, task.Name)
+	// 初始化默认任务（如果配置中没有任务）
+	if len(cfg.Tasks) == 0 {
+		cfg.Tasks = append(cfg.Tasks, TaskConfig{Name: "ff14risingstones", URL: "https://ff14risingstones.web.sdo.com/pc/index.html#/post"})
+		cfg.Tasks = append(cfg.Tasks, TaskConfig{Name: "qu_sdo", URL: "https://qu.sdo.com/personal-center?merchantId=1#pointsindex-1"})
+		SaveConfig(configFile, cfg)
+	}
+
+	for i := range cfg.Tasks {
+		// executeTask 可能会修改 cfg，传指针
+		executeTask(cfg, cfg.Tasks[i].Name)
 	}
 }
 
