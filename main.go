@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -136,6 +137,76 @@ func interactiveLogin(targetURL string) (string, error) {
 	return newCookieStr, err
 }
 
+// mergeCookies 合并旧的 Cookie 字符串和新的 Cookie 对象，返回合并后的字符串和是否发生变化
+func mergeCookies(oldStr string, newCookies []*http.Cookie) (string, bool) {
+	if len(newCookies) == 0 {
+		return oldStr, false
+	}
+
+	cookieMap := make(map[string]string)
+	pairs := strings.Split(oldStr, ";")
+	for _, pair := range pairs {
+		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(parts) == 2 {
+			cookieMap[parts[0]] = parts[1]
+		}
+	}
+
+	changed := false
+	for _, c := range newCookies {
+		if cookieMap[c.Name] != c.Value {
+			cookieMap[c.Name] = c.Value
+			changed = true
+		}
+	}
+
+	if !changed {
+		return oldStr, false
+	}
+
+	var keys []string
+	for k := range cookieMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var out []string
+	for _, k := range keys {
+		out = append(out, k+"="+cookieMap[k])
+	}
+	return strings.Join(out, "; "), true
+}
+
+// preflightRequest 在调用正式 API 前，先访问主站以触发服务器下发最新的 Session Cookie
+func preflightRequest(targetURL string, cfg *Config, task *TaskConfig) {
+	fmt.Printf("执行签到前置请求以刷新 Session: %s\n", targetURL)
+	req, _ := http.NewRequest("GET", targetURL, nil)
+	req.Header.Set("Cookie", task.CookieStr)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+	options := []tls_client.HttpClientOption{
+		tls_client.WithTimeoutSeconds(15),
+		tls_client.WithClientProfile(profiles.Chrome_124),
+	}
+	client, _ := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("前置请求异常: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	newCookieStr, changed := mergeCookies(task.CookieStr, resp.Cookies())
+	if changed {
+		task.CookieStr = newCookieStr
+		SaveConfig(configFile, cfg)
+		fmt.Println("前置请求成功，已获取最新 Session Cookie 并保存。")
+	} else {
+		fmt.Println("前置请求完成，未发现新的 Cookie。")
+	}
+}
+
 // executeTask 执行单个签到任务
 func executeTask(cfg *Config, taskName string) {
 	task := cfg.GetTask(taskName)
@@ -156,9 +227,11 @@ func executeTask(cfg *Config, taskName string) {
 	// 2. 发起 API 请求
 	var needsLogin bool
 	if task.Name == "ff14risingstones" {
-		needsLogin = doFF14SignIn(task.CookieStr)
+		preflightRequest("https://ff14risingstones.web.sdo.com/", cfg, task)
+		needsLogin = doFF14SignIn(cfg, task)
 	} else if task.Name == "qu_sdo" {
-		needsLogin = doQuSignIn(task.CookieStr)
+		preflightRequest("https://qu.sdo.com/", cfg, task)
+		needsLogin = doQuSignIn(cfg, task)
 	}
 
 	// 3. 手动接管逻辑
@@ -170,15 +243,15 @@ func executeTask(cfg *Config, taskName string) {
 			SaveConfig(configFile, cfg)
 			fmt.Println("身份已更新，进行最终尝试...")
 			if task.Name == "ff14risingstones" {
-				doFF14SignIn(task.CookieStr)
+				doFF14SignIn(cfg, task)
 			} else if task.Name == "qu_sdo" {
-				doQuSignIn(task.CookieStr)
+				doQuSignIn(cfg, task)
 			}
 		}
 	}
 }
 
-func doFF14SignIn(cookieStr string) bool {
+func doFF14SignIn(cfg *Config, task *TaskConfig) bool {
 	apiURL := "https://apiff14risingstones.web.sdo.com/api/home/sign/signIn"
 	uuid := generateUUID()
 	u, _ := url.Parse(apiURL)
@@ -191,15 +264,21 @@ func doFF14SignIn(cookieStr string) bool {
 	
 	req, _ := http.NewRequest("POST", u.String(), strings.NewReader(formData.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Cookie", cookieStr)
+	req.Header.Set("Cookie", task.CookieStr)
 	req.Header.Set("Referer", "https://ff14risingstones.web.sdo.com/")
 	req.Header.Set("Origin", "https://ff14risingstones.web.sdo.com")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-	return performRequest(req)
+	needsLogin, newCookie := performRequest(req, task.CookieStr)
+	if newCookie != "" {
+		task.CookieStr = newCookie
+		SaveConfig(configFile, cfg)
+		fmt.Println("API 响应中检测到 Cookie 更新，已自动保存。")
+	}
+	return needsLogin
 }
 
-func doQuSignIn(cookieStr string) bool {
+func doQuSignIn(cfg *Config, task *TaskConfig) bool {
 	// qu.sdo.com 的签到接口是 PUT，且有特殊的 Header
 	apiURL := "https://sqmallservice.u.sdo.com/api/us/integration/checkIn?merchantId=1"
 	
@@ -209,16 +288,22 @@ func doQuSignIn(cookieStr string) bool {
 	req.Header.Set("qu-software-platform", "1")
 	req.Header.Set("qu-deploy-platform", "1")
 	req.Header.Set("qu-web-host", "qu.sdo.com")
-	req.Header.Set("Cookie", cookieStr)
+	req.Header.Set("Cookie", task.CookieStr)
 	req.Header.Set("Referer", "https://qu.sdo.com/")
 	req.Header.Set("Origin", "https://qu.sdo.com")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-	return performRequest(req)
+	needsLogin, newCookie := performRequest(req, task.CookieStr)
+	if newCookie != "" {
+		task.CookieStr = newCookie
+		SaveConfig(configFile, cfg)
+		fmt.Println("API 响应中检测到 Cookie 更新，已自动保存。")
+	}
+	return needsLogin
 }
 
-func performRequest(req *http.Request) bool {
+func performRequest(req *http.Request, currentCookie string) (bool, string) {
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(15),
 		tls_client.WithClientProfile(profiles.Chrome_124),
@@ -228,9 +313,14 @@ func performRequest(req *http.Request) bool {
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("请求异常: %v\n", err)
-		return true
+		return true, ""
 	}
 	defer resp.Body.Close()
+
+	newCookieStr, changed := mergeCookies(currentCookie, resp.Cookies())
+	if !changed {
+		newCookieStr = ""
+	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	fmt.Printf("API HTTP 状态码: %d\n", resp.StatusCode)
@@ -254,7 +344,7 @@ func performRequest(req *http.Request) bool {
 	} else {
 		needsLogin = true
 	}
-	return needsLogin
+	return needsLogin, newCookieStr
 }
 
 func main() {

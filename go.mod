@@ -1,4 +1,4 @@
-module ff14risingstones
+module ff14checkin
 
 go 1.26.3
 
