@@ -5,7 +5,6 @@ import (
 	"os"
 )
 
-// Cookie 结构用于保存详细的 Cookie 信息
 type Cookie struct {
 	Name   string `json:"name"`
 	Value  string `json:"value"`
@@ -14,27 +13,58 @@ type Cookie struct {
 }
 
 type TaskConfig struct {
-	Name    string   `json:"name"`
-	URL     string   `json:"url"`
-	Cookies []Cookie `json:"cookies"` // 替换原有的 CookieStr
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 type Config struct {
-	Tasks []TaskConfig `json:"tasks"`
+	Cookies []Cookie     `json:"cookies"`
+	Tasks   []TaskConfig `json:"tasks"`
 }
 
 func LoadConfig(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Config{Tasks: []TaskConfig{}}, nil
+			return &Config{Tasks: []TaskConfig{}, Cookies: []Cookie{}}, nil
 		}
 		return nil, err
 	}
+
+	// 兼容旧配置：如果 cookies 在 task 里面，提取并合并到全局
+	type OldTaskConfig struct {
+		Name    string   `json:"name"`
+		URL     string   `json:"url"`
+		Cookies []Cookie `json:"cookies"`
+	}
+	type OldConfig struct {
+		Tasks []OldTaskConfig `json:"tasks"`
+	}
+
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+
+	if len(cfg.Cookies) == 0 {
+		var oldCfg OldConfig
+		if err := json.Unmarshal(data, &oldCfg); err == nil {
+			cookieMap := make(map[string]Cookie)
+			for _, t := range oldCfg.Tasks {
+				for _, c := range t.Cookies {
+					key := c.Name + "|" + c.Domain + "|" + c.Path
+					cookieMap[key] = c
+				}
+			}
+			for _, c := range cookieMap {
+				cfg.Cookies = append(cfg.Cookies, c)
+			}
+			if len(cfg.Cookies) > 0 {
+				SaveConfig(filename, &cfg)
+			}
+		}
+	}
+
 	return &cfg, nil
 }
 
@@ -43,9 +73,9 @@ func SaveConfig(filename string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	// 使用 0600 权限：仅当前用户读写，防止其它用户窃取 Cookie
 	return os.WriteFile(filename, data, 0600)
 }
+
 func (c *Config) GetTask(name string) *TaskConfig {
 	for i := range c.Tasks {
 		if c.Tasks[i].Name == name {
@@ -53,15 +83,4 @@ func (c *Config) GetTask(name string) *TaskConfig {
 		}
 	}
 	return nil
-}
-
-func (c *Config) UpdateTaskCookies(name string, cookies []Cookie) {
-	for i := range c.Tasks {
-		if c.Tasks[i].Name == name {
-			c.Tasks[i].Cookies = cookies
-			return
-		}
-	}
-	// 如果不存在，则新增（通常用于初始化）
-	c.Tasks = append(c.Tasks, TaskConfig{Name: name, Cookies: cookies})
 }
