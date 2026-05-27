@@ -233,7 +233,7 @@ func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
 			log.Println(">>> 登录成功后，请在终端按【回车键 (Enter)】继续抓取 Cookie... <<<")
 			var dummy string
 			fmt.Scanln(&dummy)
-			
+
 			log.Println("正在提取最新 Cookie，等待数据同步...")
 			var newCookies []Cookie
 			for i := 0; i < 5; i++ {
@@ -242,7 +242,7 @@ func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
 					return err
 				}
 				newCookies = filterSdoCookies(cookies)
-				
+
 				// 检查是否已包含 sqmallservice 的 sessionId (针对 qu_sdo)
 				hasSession := false
 				for _, c := range newCookies {
@@ -256,7 +256,7 @@ func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
 				}
 				time.Sleep(1 * time.Second)
 			}
-			
+
 			var updated []Cookie
 			updated, changed = mergeRawCookies(cfg.Cookies, newCookies)
 			if changed {
