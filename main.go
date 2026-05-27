@@ -146,7 +146,7 @@ func filterSdoCookies(cookies []*network.Cookie) []Cookie {
 
 // refreshCookies 启动一个无头浏览器访问目标 URL，过验后抓取完整 Cookie 并合并到全局池
 func refreshCookies(targetURL string, cfg *Config) (bool, error) {
-	fmt.Printf("正在通过 chromedp 刷新 Cookie [%s]...\n", targetURL)
+	log.Printf("正在通过 chromedp 刷新 Cookie [%s]...\n", targetURL)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
@@ -207,7 +207,7 @@ func refreshCookies(targetURL string, cfg *Config) (bool, error) {
 }
 
 func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
-	fmt.Printf("启动可视化浏览器，请在窗口中登录 [%s]...\n", targetURL)
+	log.Printf("启动可视化浏览器，请在窗口中登录 [%s]...\n", targetURL)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
 		chromedp.Flag("disable-gpu", true),
@@ -229,16 +229,34 @@ func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
 		}),
 		chromedp.Navigate(targetURL),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			fmt.Println("\n【注意】请在弹出的浏览器窗口中手动完成登录。")
-			fmt.Println(">>> 登录成功后，请在终端按【回车键 (Enter)】继续抓取 Cookie... <<<")
+			log.Println("\n【注意】请在弹出的浏览器窗口中手动完成登录。")
+			log.Println(">>> 登录成功后，请在终端按【回车键 (Enter)】继续抓取 Cookie... <<<")
 			var dummy string
 			fmt.Scanln(&dummy)
-			fmt.Println("正在提取最新 Cookie...")
-			cookies, err := storage.GetCookies().Do(ctx)
-			if err != nil {
-				return err
+			
+			log.Println("正在提取最新 Cookie，等待数据同步...")
+			var newCookies []Cookie
+			for i := 0; i < 5; i++ {
+				cookies, err := storage.GetCookies().Do(ctx)
+				if err != nil {
+					return err
+				}
+				newCookies = filterSdoCookies(cookies)
+				
+				// 检查是否已包含 sqmallservice 的 sessionId (针对 qu_sdo)
+				hasSession := false
+				for _, c := range newCookies {
+					if c.Name == "sessionId" && c.Domain == "sqmallservice.u.sdo.com" {
+						hasSession = true
+						break
+					}
+				}
+				if hasSession {
+					break
+				}
+				time.Sleep(1 * time.Second)
 			}
-			newCookies := filterSdoCookies(cookies)
+			
 			var updated []Cookie
 			updated, changed = mergeRawCookies(cfg.Cookies, newCookies)
 			if changed {
@@ -254,8 +272,18 @@ func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
 
 // preflightRequest 在调用正式 API 前，先访问主站以触发服务器下发最新的 Session Cookie
 func preflightRequest(targetURL string, cfg *Config) {
-	fmt.Printf("执行签到前置请求以刷新 Session: %s\n", targetURL)
+	log.Printf("执行签到前置请求以刷新 Session: %s\n", targetURL)
 	req, _ := http.NewRequest("GET", targetURL, nil)
+
+	if strings.Contains(targetURL, "sqmallservice.u.sdo.com") {
+		req.Header.Set("qu-merchant-id", "1")
+		req.Header.Set("qu-hardware-platform", "3")
+		req.Header.Set("qu-software-platform", "1")
+		req.Header.Set("qu-deploy-platform", "1")
+		req.Header.Set("qu-web-host", "qu.sdo.com")
+		req.Header.Set("Origin", "https://qu.sdo.com")
+		req.Header.Set("Referer", "https://qu.sdo.com/")
+	}
 
 	matchedCookies := getCookiesForURL(cfg.Cookies, targetURL)
 	req.Header.Set("Cookie", cookiesToStr(matchedCookies))
@@ -269,7 +297,7 @@ func preflightRequest(targetURL string, cfg *Config) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("前置请求异常: %v\n", err)
+		log.Printf("前置请求异常: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -279,9 +307,9 @@ func preflightRequest(targetURL string, cfg *Config) {
 	if changed {
 		cfg.Cookies = newCookies
 		SaveConfig(configFile, cfg)
-		fmt.Println("前置请求成功，已获取最新 Session Cookie 并保存到全局。")
+		log.Println("前置请求成功，已获取最新 Session Cookie 并保存到全局。")
 	} else {
-		fmt.Println("前置请求完成，未发现新的 Cookie。")
+		log.Println("前置请求完成，未发现新的 Cookie。")
 	}
 }
 
@@ -293,12 +321,12 @@ func executeTask(cfg *Config, taskName string) {
 		return
 	}
 
-	fmt.Printf("\n--- 开始执行任务: %s ---\n", task.Name)
+	log.Printf("\n--- 开始执行任务: %s ---\n", task.Name)
 
 	// 1. 尝试无头模式刷新 Cookie
 	changed, _ := refreshCookies(task.URL, cfg)
 	if changed {
-		fmt.Println("无头模式刷新了部分全局 Cookie。")
+		log.Println("无头模式刷新了部分全局 Cookie。")
 	}
 
 	// 2. 发起 API 请求
@@ -307,23 +335,25 @@ func executeTask(cfg *Config, taskName string) {
 		preflightRequest("https://ff14risingstones.web.sdo.com/", cfg)
 		needsLogin = doFF14SignIn(cfg, task)
 	} else if task.Name == "qu_sdo" {
-		preflightRequest("https://qu.sdo.com/personal-center", cfg)
+		preflightRequest("https://sqmallservice.u.sdo.com/api/us/getSessionStatus", cfg)
 		needsLogin = doQuSignIn(cfg, task)
 	}
 
 	// 3. 手动接管逻辑
 	if needsLogin {
-		fmt.Printf("任务 %s 身份失效或需要验证，进入手动接管模式...\n", task.Name)
+		log.Printf("任务 %s 身份失效或需要验证，进入手动接管模式...\n", task.Name)
 		changed, err := interactiveLogin(task.URL, cfg)
 		if err == nil && changed {
-			fmt.Println("身份已更新，进行最终尝试...")
+			log.Println("身份已更新，进行最终尝试...")
 			if task.Name == "ff14risingstones" {
+				preflightRequest("https://ff14risingstones.web.sdo.com/", cfg)
 				doFF14SignIn(cfg, task)
 			} else if task.Name == "qu_sdo" {
+				preflightRequest("https://sqmallservice.u.sdo.com/api/us/getSessionStatus", cfg)
 				doQuSignIn(cfg, task)
 			}
 		} else if err != nil {
-			fmt.Printf("手动登录异常: %v\n", err)
+			log.Printf("手动登录异常: %v\n", err)
 		}
 	}
 }
@@ -381,7 +411,7 @@ func performRequest(req *http.Request, cfg *Config) bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("请求异常: %v\n", err)
+		log.Printf("请求异常: %v\n", err)
 		return true // needsLogin
 	}
 	defer resp.Body.Close()
@@ -391,11 +421,11 @@ func performRequest(req *http.Request, cfg *Config) bool {
 	if changed {
 		cfg.Cookies = newCookies
 		SaveConfig(configFile, cfg)
-		fmt.Println("API 响应中检测到 Cookie 更新，已自动保存全局池。")
+		log.Println("API 响应中检测到 Cookie 更新，已自动保存全局池。")
 	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
-	fmt.Printf("API HTTP 状态码: %d\n", resp.StatusCode)
+	log.Printf("API HTTP 状态码: %d\n", resp.StatusCode)
 
 	needsLogin := false
 	if resp.StatusCode != 200 {
@@ -405,7 +435,7 @@ func performRequest(req *http.Request, cfg *Config) bool {
 	var jsonObj map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
 		pretty, _ := json.MarshalIndent(jsonObj, "", "  ")
-		fmt.Printf("响应内容: \n%s\n", string(pretty))
+		log.Printf("响应内容: \n%s\n", string(pretty))
 		if code, ok := jsonObj["code"].(float64); ok && (code == 10105 || code == 10403 || code == -10350174) {
 			needsLogin = true
 		}
@@ -419,6 +449,9 @@ func performRequest(req *http.Request, cfg *Config) bool {
 }
 
 func main() {
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.Ldate | log.Ltime)
+
 	if !waitForNetwork() {
 		slog.Error("网络检查失败，重试次数耗尽，程序退出")
 		os.Exit(1)
