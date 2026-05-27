@@ -1,4 +1,4 @@
-module ff14checkin
+module github.com/SakagamiJun/ff14checkin
 
 go 1.26.3
 
