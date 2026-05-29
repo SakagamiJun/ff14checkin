@@ -263,6 +263,7 @@ func interactiveLogin(targetURL string, cfg *Config) (bool, error) {
 				cfg.Cookies = updated
 				SaveConfig(configFile, cfg)
 			}
+			upgradeToAppSession(cfg)
 			return nil
 		}),
 	)
@@ -322,6 +323,8 @@ func executeTask(cfg *Config, taskName string) {
 	}
 
 	log.Printf("\n--- 开始执行任务: %s ---\n", task.Name)
+
+	refreshSdoAppSession(cfg)
 
 	// 1. 尝试无头模式刷新 Cookie
 	changed, _ := refreshCookies(task.URL, cfg)

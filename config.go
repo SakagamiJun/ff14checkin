@@ -18,8 +18,11 @@ type TaskConfig struct {
 }
 
 type Config struct {
-	Cookies []Cookie     `json:"cookies"`
-	Tasks   []TaskConfig `json:"tasks"`
+	Cookies      []Cookie     `json:"cookies"`
+	Tasks        []TaskConfig `json:"tasks"`
+	DeviceId     string       `json:"deviceId,omitempty"`
+	MacId        string       `json:"macId,omitempty"`
+	AutoLoginKey string       `json:"autoLoginKey,omitempty"`
 }
 
 func LoadConfig(filename string) (*Config, error) {
