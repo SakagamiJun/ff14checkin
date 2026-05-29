@@ -150,10 +150,10 @@ func upgradeToAppSession(cfg *Config) {
 
 	// 2. accountGroupLogin
 	res2, err := doSdoAppRequest("accountGroupLogin", map[string]string{
-		"serviceUrl": "http://www.sdo.com",
-		"tgt": tgt,
-		"sndaId": sndaId,
-		"autoLoginFlag": "1",
+		"serviceUrl":        "http://www.sdo.com",
+		"tgt":               tgt,
+		"sndaId":            sndaId,
+		"autoLoginFlag":     "1",
 		"autoLoginKeepTime": "30",
 	}, cfg, tgt)
 
@@ -189,7 +189,7 @@ func refreshSdoAppSession(cfg *Config) bool {
 	log.Println("正在通过 App API 刷新长效 Session...")
 	res, err := doSdoAppRequest("autoLogin.json", map[string]string{
 		"autoLoginSessionKey": cfg.AutoLoginKey,
-		"guid": guid,
+		"guid":                guid,
 	}, cfg, "")
 
 	if err != nil {
@@ -215,10 +215,10 @@ func refreshSdoAppSession(cfg *Config) bool {
 				}
 				if !found {
 					cfg.Cookies = append(cfg.Cookies, Cookie{
-						Name: "CASTGC",
-						Value: newTgt,
+						Name:   "CASTGC",
+						Value:  newTgt,
 						Domain: ".sdo.com",
-						Path: "/",
+						Path:   "/",
 					})
 				}
 				SaveConfig(configFile, cfg)
